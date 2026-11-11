@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Refund saga demo</title>
+<!-- The curl commands of the README, in a browser: buttons for "refund" and each fault, and a live view of /state. -->
+<style>
+  body { font: 18px/1.4 system-ui, sans-serif; margin: 2rem auto; max-width: 72rem; padding: 0 1rem; color: #1a1a1a; background: #fff; }
+  h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
+  h2 { font-size: .95rem; text-transform: uppercase; letter-spacing: .03em; color: #555; margin: 0 0 .5rem; }
+  #mode { color: #555; margin: 0 0 1.5rem; }
+  .actions { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin-bottom: .6rem; }
+  .actions .label { color: #555; font-size: .85rem; min-width: 7rem; }
+  button, select { font: inherit; padding: .45rem .9rem; border-radius: .4rem; border: 1px solid #888; }
+  button { background: #f4f4f4; cursor: pointer; }
+  button:hover { background: #e6e6e6; }
+  button.refund { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  button.fail { background: #fff8e5; border-color: #bf8700; }
+  button.crash { background: #fff1f0; border-color: #d1242f; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  #result { min-height: 1.5em; margin: 1rem 0 2rem; font-weight: 600; }
+  #down { display: none; padding: 1rem; border-radius: .4rem; background: #1a1a1a; color: #fff; margin-bottom: 1rem; }
+  #waiting { display: inline-block; margin-left: .5rem; animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: .3; } 50% { opacity: 1; } }
+  body.down #down { display: block; }
+  body.down #status { display: none; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; margin-bottom: 2rem; }
+  th, td { text-align: left; padding: .4rem .75rem; border-bottom: 1px solid #ddd; white-space: nowrap; }
+  th { font-size: .8rem; text-transform: uppercase; color: #555; }
+  td:last-child { white-space: normal; }
+  td.empty { color: #888; font-style: italic; }
+  td.bad { background: #ffebe9; font-weight: 600; }
+  td.busy { background: #fff8c5; }
+  #in-doubt td { background: #fff8c5; }
+  .muted { color: #888; font-size: .8rem; margin: .25rem 0 0; }
+  #arch { margin-top: 1rem; }
+  #arch .flow { display: flex; flex-direction: column; align-items: flex-start; gap: .1rem; font-size: .95rem; }
+  #arch .node { font-weight: 600; }
+  #arch .step { padding: .15rem 0; }
+  #arch .boxed { border: 2px dashed #1f6feb; border-radius: .5rem; padding: .35rem .6rem; margin: .15rem 0; }
+  #arch .tx-label { color: #1f6feb; font-size: .85rem; margin: .1rem 0 .35rem; }
+  #arch .arrow { color: #999; }
+</style>
+</head>
+<body>
+<h1>Refund a customer across four systems</h1>
+<p id="mode">One tool for the agent: <code>POST /refunds</code>. XA where you can, sagas where you must.</p>
+
+<div class="actions">
+  <span class="label">Order</span>
+  <select id="order" aria-label="order to refund"></select>
+  <button class="refund" onclick="refund()">Refund</button>
+  <button id="retry" onclick="retry()" disabled title="Sends the previous request again, with the same refundId and no fault">Retry with the same refundId</button>
+  <button onclick="reset()" title="All orders back to PAID, everything else emptied">Reset</button>
+</div>
+<div class="actions">
+  <span class="label">Fail (exception)</span>
+  <button class="fail" onclick="refund('CRM_REJECTS')">CRM rejects</button>
+  <button class="fail" onclick="refund('CRM_FAILS_AFTER_APPLY')">CRM applies, then errors</button>
+  <button class="fail" onclick="refund('FAIL_AFTER_DB_UPDATE')">After the DB update</button>
+  <button class="fail" onclick="refund('FAIL_BEFORE_COMMIT')">Before the commit</button>
+</div>
+<div class="actions">
+  <span class="label">Crash (JVM halt)</span>
+  <button class="crash" onclick="refund('CRASH_AFTER_CRM')">💣 After the CRM update</button>
+  <button class="crash" onclick="refund('CRASH_BEFORE_COMMIT')">💣 Before the commit</button>
+  <button class="crash" onclick="refund('CRASH_AFTER_COMMIT')">💣 After the commit</button>
+</div>
+<p id="result"></p>
+
+<div id="down">💀 The app is down. Restart it (<code>mvn spring-boot:run</code>).<span id="waiting">⏳ watching for restart…</span></div>
+<div id="status">
+  <div class="scroll">
+    <table>
+      <thead><tr>
+        <th>Order</th><th>Order DB</th><th>Billing (event)</th><th>Email</th><th>CRM note</th><th>Saga</th><th>Do the systems agree?</th>
+      </tr></thead>
+      <tbody id="orders"></tbody>
+    </table>
+  </div>
+  <table>
+    <thead><tr><th>In-doubt (prepared) transactions</th><th>Prepared</th></tr></thead>
+    <tbody id="in-doubt"></tbody>
+  </table>
+</div>
+
+<section id="arch">
+  <h2>How it works</h2>
+  <div class="flow">
+    <div class="node">refund(refundId, orderId)</div>
+    <div class="step">① record the intent <span class="arrow">→</span> <strong>PostgreSQL</strong> · saga row PENDING</div>
+    <div class="step">② add the refund note <span class="arrow">→</span> <strong>CRM</strong> over HTTP, idempotency key = refundId</div>
+    <div class="boxed">
+      <div class="step">③ mark the order refunded, saga row COMPLETED <span class="arrow">→</span> <strong>PostgreSQL</strong></div>
+      <div class="step">④ publish RefundIssued <span class="arrow">→</span> <strong>Artemis</strong> · queue "refund.events"</div>
+      <div class="step">⑤ request the confirmation email <span class="arrow">→</span> <strong>Artemis</strong> · queue "email.requests"</div>
+    </div>
+    <div class="tx-label">Dashed box = one XA transaction: all three commit together, or none does.</div>
+    <div class="arrow">↓&nbsp; only after commit</div>
+    <div class="node">BillingListener books the refund · EmailSender sends the email</div>
+  </div>
+  <p class="muted">The CRM cannot join the transaction. If anything fails after step ②, the compensator reverts the note by its key;
+    after a crash, a sweep does the same once the refund has been PENDING for 30 seconds.</p>
+</section>
+
+<script>
+  const $ = id => document.getElementById(id);
+  let last = null; // the previous request, for "retry with the same refundId"
+
+  async function post(body, crash) {
+    try {
+      const response = await fetch('/refunds', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const answer = await response.json();
+      const icon = { REFUNDED: '✅', FAILED: '↩', IN_PROGRESS: '⏳' }[answer.outcome] ?? '';
+      $('result').textContent = answer.outcome
+          ? `${icon} ${answer.outcome} (HTTP ${response.status}) - ${body.refundId} for ${body.orderId}` + (answer.detail ? ': ' + answer.detail : '')
+          : `error: HTTP ${response.status} ${answer.error ?? ''}`;
+    } catch (e) {
+      $('result').textContent = crash
+          ? `💥 no answer: the app crashed. Restart it, then retry ${body.refundId} or watch the sweep clean up.`
+          : '💥 no answer - did the app just crash?';
+    }
+    refresh();
+  }
+
+  function refund(fault) {
+    const orderId = $('order').value;
+    if (!orderId) { $('result').textContent = 'no order selected'; return; }
+    last = { refundId: 'r-' + Math.random().toString(36).slice(2, 8), orderId };
+    $('retry').disabled = false;
+    $('result').textContent = fault ? `refunding ${orderId} with fault ${fault}…` : `refunding ${orderId}…`;
+    post(fault ? { ...last, fault } : last, fault && fault.startsWith('CRASH_'));
+  }
+
+  function retry() {
+    $('result').textContent = `retrying ${last.refundId}…`;
+    post(last, false);
+  }
+
+  async function reset() {
+    await fetch('/reset', { method: 'POST' }).catch(() => {});
+    last = null;
+    $('retry').disabled = true;
+    $('result').textContent = 'reset: all orders are PAID again';
+    refresh();
+  }
+
+  // One row per order: what each system knows about it, and whether they agree.
+  function view(order, state) {
+    const sagas = state.sagas.filter(s => s.order_id === order.id);
+    const keys = new Set(sagas.map(s => s.refund_id));
+    const billing = state.billingLedger.filter(b => b.order_id === order.id).length;
+    const emails = state.sentEmails.filter(e => keys.has(e.refund_id)).length;
+    const notes = state.crmNotes.filter(n => keys.has(n.idempotency_key));
+    const active = notes.filter(n => n.status === 'ACTIVE').length;
+    const saga = sagas[sagas.length - 1];
+    const busy = sagas.some(s => s.status === 'PENDING' || s.status === 'COMPENSATING');
+    const refunded = order.status === 'REFUNDED';
+
+    let verdict, cls = '';
+    if (refunded && billing === 1 && emails === 1 && active === 1) verdict = '✅ refunded everywhere';
+    else if (refunded && billing <= 1 && emails <= 1 && active === 1) { verdict = '⏳ messages on their way'; cls = 'busy'; }
+    else if (!refunded && billing === 0 && emails === 0 && active === 0) verdict = sagas.length ? '✅ not refunded anywhere' : '';
+    else if (!refunded && billing === 0 && emails === 0 && busy) { verdict = '⏳ CRM note awaits compensation'; cls = 'busy'; }
+    else { verdict = '❌ inconsistent'; cls = 'bad'; }
+
+    const count = (n, word) => n === 0 ? '—' : n === 1 ? '✅ ' + word : `❌ ${word} ×${n}`;
+    return {
+      cells: [
+        `${order.id} · ${Number(order.amount).toFixed(2)}`,
+        refunded ? '✅ REFUNDED' : 'PAID',
+        count(billing, 'booked'),
+        count(emails, 'sent'),
+        active ? count(active, 'active') : notes.length ? '↩ reverted' : '—',
+        saga ? `${saga.status} (${saga.refund_id})` : '—',
+        verdict],
+      verdictClass: cls };
+  }
+
+  function rows(tbody, items, empty, columns) {
+    tbody.replaceChildren(...(items.length ? items.map(item => {
+      const tr = document.createElement('tr');
+      item.cells.forEach((value, i) => {
+        const td = document.createElement('td');
+        td.textContent = value ?? '';
+        if (i === item.cells.length - 1 && item.verdictClass) td.className = item.verdictClass;
+        tr.append(td);
+      });
+      return tr;
+    }) : [Object.assign(document.createElement('tr'), { innerHTML: `<td class="empty" colspan="${columns}">${empty}</td>` })]));
+  }
+
+  function fillOrders(orders) {
+    const select = $('order');
+    const wanted = orders.map(o => o.id + (o.status === 'PAID' ? '' : ' (refunded)'));
+    const current = [...select.options].map(o => o.textContent);
+    if (wanted.join() === current.join()) return; // unchanged: keep the user's selection
+    const selected = select.value;
+    select.replaceChildren(...orders.map(o => {
+      const option = document.createElement('option');
+      option.value = o.id;
+      option.textContent = o.id + (o.status === 'PAID' ? '' : ' (refunded)');
+      return option;
+    }));
+    const stillPaid = orders.find(o => o.id === selected && o.status === 'PAID');
+    select.value = (stillPaid ?? orders.find(o => o.status === 'PAID') ?? orders[0])?.id ?? '';
+  }
+
+  async function refresh() {
+    try {
+      const response = await fetch('/state', { signal: AbortSignal.timeout(2000) });
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      const state = await response.json();
+      if (document.body.classList.contains('down')) $('result').textContent = 'the app is back up';
+      document.body.classList.remove('down');
+      fillOrders(state.orders);
+      rows($('orders'), state.orders.map(o => view(o, state)), 'no orders', 7);
+      rows($('in-doubt'), state.inDoubt.map(t => ({ cells: [t.gid, new Date(t.prepared).toLocaleTimeString()] })), 'none', 2);
+    } catch (e) {
+      document.body.classList.add('down');
+    }
+  }
+
+  (function poll() { refresh().finally(() => setTimeout(poll, 500)); })();
+</script>
+</body>
+</html>

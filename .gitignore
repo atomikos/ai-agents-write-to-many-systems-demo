@@ -5,3 +5,6 @@ transaction-logs/
 *.iml
 .vscode/
 *.docx
+.classpath
+.project
+.settings/

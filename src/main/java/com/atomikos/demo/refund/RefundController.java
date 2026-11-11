@@ -62,7 +62,20 @@ public class RefundController {
             state.put("sentEmails", jdbc.queryForList("SELECT refund_id, customer_id FROM sent_email ORDER BY refund_id"));
             state.put("crmNotes", jdbc.queryForList(
                     "SELECT idempotency_key, customer_id, note, status FROM fake_crm_note ORDER BY idempotency_key"));
+            state.put("inDoubt", jdbc.queryForList("SELECT gid, prepared FROM pg_prepared_xacts"));
             return state;
+        });
+    }
+
+    /** Demo plumbing: all orders back to PAID, everything else emptied. */
+    @PostMapping("/reset")
+    public void reset() {
+        tx.run(() -> {
+            jdbc.update("DELETE FROM refund_saga");
+            jdbc.update("DELETE FROM billing_ledger");
+            jdbc.update("DELETE FROM sent_email");
+            jdbc.update("DELETE FROM fake_crm_note");
+            return jdbc.update("UPDATE orders SET status = 'PAID'");
         });
     }
 

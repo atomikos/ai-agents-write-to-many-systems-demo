@@ -31,6 +31,12 @@ curl -s -H 'Content-Type: application/json' \
 curl -s localhost:8080/state   # what every system knows: orders, sagas, billing, emails, CRM
 ```
 
+Or open **http://localhost:8080/**: a button to refund an order, one button per
+fault, and a table that shows what each system knows about every order and
+whether they agree, refreshed twice a second. When the app is down the page says
+so and picks up again after a restart, so you can watch the sweep clean up.
+**Reset** puts all orders back to `PAID`.
+
 `refundId` is the caller's idempotency key: repeating the call never refunds twice,
 it reports the outcome of the first call.
 
@@ -42,7 +48,7 @@ it reports the outcome of the first call.
 
 ## Provoke the failures
 
-Add `"fault"` to the request, then look at `/state`.
+Click the fault's button on the page, or add `"fault"` to the request and look at `/state`.
 
 | Fault | What happens | What you should see |
 |---|---|---|
