@@ -1,0 +1,7 @@
+target/
+transaction-logs/
+*.log
+.idea/
+*.iml
+.vscode/
+*.docx
