@@ -102,3 +102,7 @@ that does not kill the JVM. The `CRASH_*` faults are manual, as above.
 - Fault injection is always on and can halt the JVM: do not expose this application.
 - The Atomikos transaction log is written to `transaction-logs/`. Deleting it while
   transactions are in doubt breaks recovery.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
