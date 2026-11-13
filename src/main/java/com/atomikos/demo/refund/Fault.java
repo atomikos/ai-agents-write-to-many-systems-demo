@@ -17,10 +17,19 @@ public enum Fault {
     CRASH_AFTER_CRM,
     /** Exception after the order row is updated, before anything is sent to the broker. */
     FAIL_AFTER_DB_UPDATE,
+    /** JVM dies after the order row is updated, before anything is sent to the broker. */
+    CRASH_AFTER_DB_UPDATE,
+    /** The broker takes the RefundIssued event, but its answer is lost: the caller sees an error. */
+    BROKER_ANSWER_LOST,
     /** Exception after all three writes (order, event, email request), before commit. */
     FAIL_BEFORE_COMMIT,
     /** JVM dies after all three writes, before commit. */
     CRASH_BEFORE_COMMIT,
+    /**
+     * JVM dies in the middle of the commit: PostgreSQL and Artemis are prepared and
+     * the commit decision is logged, but PostgreSQL is not committed yet.
+     */
+    CRASH_AFTER_PREPARE,
     /** JVM dies after commit, before the caller gets an answer. */
     CRASH_AFTER_COMMIT;
 

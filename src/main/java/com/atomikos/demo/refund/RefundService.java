@@ -83,7 +83,7 @@ public class RefundService {
 
     /** Database and broker writes commit together or not at all, including across a crash. */
     private void commitTransactionalCore(String refundId, Order order, Fault fault) {
-        tx.run(() -> {
+        CrashAfterPrepareConfiguration.armedFor(fault, () -> tx.run(() -> {
             if (!sagas.complete(refundId)) {
                 throw new IllegalStateException("Refund " + refundId + " is already being compensated");
             }
@@ -94,6 +94,7 @@ public class RefundService {
                 throw new IllegalStateException("Order " + order.id() + " is not refundable (already refunded?)");
             }
             Fault.FAIL_AFTER_DB_UPDATE.triggerIf(fault);
+            Fault.CRASH_AFTER_DB_UPDATE.triggerIf(fault);
 
             Map<String, Object> message = Map.of(
                     "refundId", refundId,
@@ -102,13 +103,14 @@ public class RefundService {
                     "amount", order.amount().toPlainString());
             // 2. publish RefundIssued for billing and analytics
             jms.convertAndSend(REFUND_EVENTS, message);
+            Fault.BROKER_ANSWER_LOST.triggerIf(fault);
             // 3. queue the confirmation email for the post-commit sender
             jms.convertAndSend(EMAIL_REQUESTS, message);
 
             Fault.FAIL_BEFORE_COMMIT.triggerIf(fault);
             Fault.CRASH_BEFORE_COMMIT.triggerIf(fault);
             return null;
-        });
+        }));
     }
 
     private RefundResult compensate(String refundId, Exception cause) {
