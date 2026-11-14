@@ -23,6 +23,7 @@ import java.time.Duration;
 import java.util.UUID;
 
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -43,12 +44,13 @@ import com.atomikos.demo.refund.RefundResult.Outcome;
 /**
  * Runs the refund against real PostgreSQL and Artemis containers (needs Docker)
  * and checks that all systems agree after each failure of the article's failure table.
- * The CRASH_* faults kill the JVM, so they are exercised by hand: see the README.
+ * The CRASH_* faults kill the JVM: {@link CrashRecoveryTest} runs them in a JVM of their own.
  */
 @SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT,
         properties = { "refund.saga.sweep-interval=1h", "atomikos.properties.log-base-dir=target/transaction-logs" })
 @Testcontainers(disabledWithoutDocker = true)
 @DirtiesContext // closes the application before the containers stop
+@DisplayName("The hybrid pattern")
 class RefundServiceTest {
 
     @Container
@@ -89,6 +91,7 @@ class RefundServiceTest {
     }
 
     @Test
+    @DisplayName("A refund reaches all four systems, once")
     void aRefundReachesAllFourSystems() {
         RefundResult result = refunds.refund(refundId, orderId, Fault.NONE);
 
@@ -101,7 +104,8 @@ class RefundServiceTest {
         });
     }
 
-    @ParameterizedTest
+    @ParameterizedTest(name = "{0}")
+    @DisplayName("A transactional core: a failure inside it rolls back database and broker together, and the CRM is compensated")
     @EnumSource(value = Fault.class, names = { "FAIL_AFTER_DB_UPDATE", "FAIL_BEFORE_COMMIT" })
     void aFailureInTheCoreRollsBackDatabaseAndBrokerAndRevertsTheCrm(Fault fault) {
         RefundResult result = refunds.refund(refundId, orderId, fault);
@@ -115,6 +119,7 @@ class RefundServiceTest {
     }
 
     @Test
+    @DisplayName("Compensation for the rest: a CRM update with unknown outcome is found by its key and reverted")
     void aCrmUpdateWithUnknownOutcomeIsFoundByItsKeyAndReverted() {
         RefundResult result = refunds.refund(refundId, orderId, Fault.CRM_FAILS_AFTER_APPLY);
 
@@ -125,6 +130,7 @@ class RefundServiceTest {
     }
 
     @Test
+    @DisplayName("Compensation for the rest: a rejected CRM update leaves nothing to revert")
     void aRejectedCrmUpdateLeavesNothingToRevert() {
         RefundResult result = refunds.refund(refundId, orderId, Fault.CRM_REJECTS);
 
@@ -135,6 +141,7 @@ class RefundServiceTest {
     }
 
     @Test
+    @DisplayName("One tool: calling again with the same refundId never refunds twice")
     void aRetryWithTheSameKeyDoesNotRefundTwice() {
         refunds.refund(refundId, orderId, Fault.NONE);
         RefundResult retry = refunds.refund(refundId, orderId, Fault.NONE);
@@ -147,6 +154,7 @@ class RefundServiceTest {
     }
 
     @Test
+    @DisplayName("An order is not refunded twice under a different refundId")
     void anOrderIsNotRefundedTwiceUnderADifferentKey() {
         refunds.refund(refundId, orderId, Fault.NONE);
         String otherKey = "refund-" + UUID.randomUUID();
@@ -159,6 +167,7 @@ class RefundServiceTest {
     }
 
     @Test
+    @DisplayName("The minimal coordinator: the sweep compensates a refund abandoned by a crash")
     void theSweepCompensatesARefundAbandonedByACrash() {
         // the state a crash after the CRM update leaves behind: a PENDING saga and an active CRM note
         tx.run(() -> {

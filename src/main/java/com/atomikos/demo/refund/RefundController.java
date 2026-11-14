@@ -41,12 +41,18 @@ public class RefundController {
     public record RefundRequest(String refundId, String orderId, Fault fault) {
     }
 
+    /** @param fault optional failure injection, for the demo only */
+    public record NaiveRefundRequest(String orderId, Fault fault) {
+    }
+
     private final RefundService refunds;
+    private final NaiveRefundService naiveRefunds;
     private final Tx tx;
     private final JdbcTemplate jdbc;
 
-    public RefundController(RefundService refunds, Tx tx, JdbcTemplate jdbc) {
+    public RefundController(RefundService refunds, NaiveRefundService naiveRefunds, Tx tx, JdbcTemplate jdbc) {
         this.refunds = refunds;
+        this.naiveRefunds = naiveRefunds;
         this.tx = tx;
         this.jdbc = jdbc;
     }
@@ -64,6 +70,19 @@ public class RefundController {
             case FAILED -> HttpStatus.CONFLICT;
         };
         return ResponseEntity.status(status).body(result);
+    }
+
+    /** For comparison only: the same refund without coordination (see {@link NaiveRefundService}). */
+    @PostMapping("/naive-refunds")
+    public void naiveRefund(@RequestBody NaiveRefundRequest request) {
+        if (isBlank(request.orderId())) {
+            throw new IllegalArgumentException("orderId is required");
+        }
+        Fault fault = Fault.NONE;
+        if (request.fault() != null) {
+            fault = request.fault();
+        }
+        naiveRefunds.refund(request.orderId(), fault);
     }
 
     /** Everything every system knows, to check consistency after a demo scenario. */
