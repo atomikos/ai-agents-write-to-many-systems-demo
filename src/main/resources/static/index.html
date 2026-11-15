@@ -42,35 +42,48 @@
   #arch .boxed { border: 2px dashed #1f6feb; border-radius: .5rem; padding: .35rem .6rem; margin: .15rem 0; }
   #arch .tx-label { color: #1f6feb; font-size: .85rem; margin: .1rem 0 .35rem; }
   #arch .arrow { color: #999; }
+  body.naive .hybrid-only, body:not(.naive) .naive-only { display: none; }
 </style>
 </head>
 <body>
 <h1>Refund a customer across four systems</h1>
-<p id="mode">One tool for the agent: <code>POST /refunds</code>. XA where you can, sagas where you must.</p>
+<div class="actions" role="radiogroup" aria-label="how the refund is done">
+  <span class="label">Mode</span>
+  <label><input type="radio" name="mode" value="hybrid" checked onchange="setMode(this.value)"> Hybrid pattern: one tool</label>
+  <label><input type="radio" name="mode" value="naive" onchange="setMode(this.value)"> Without coordination: four separate calls</label>
+</div>
+<p id="mode"></p>
 
 <div class="actions">
   <span class="label">Order</span>
   <select id="order" aria-label="order to refund"></select>
   <button class="refund" onclick="refund()">Refund</button>
-  <button id="retry" onclick="retry()" disabled title="Sends the previous request again, with the same refundId and no fault">Retry with the same refundId</button>
+  <button id="retry" onclick="retry()" disabled></button>
   <button onclick="reset()" title="All orders back to PAID, everything else emptied">Reset</button>
 </div>
 <div class="actions">
+  <span class="label">The failure table</span>
+  <button class="crash" onclick="refund('CRASH_AFTER_DB_UPDATE')">💣 Crash after step 1</button>
+  <button class="fail" onclick="refund('BROKER_ANSWER_LOST')">Broker timeout on step 2</button>
+  <button class="fail" onclick="refund('CRM_REJECTS')">CRM call fails at step 3</button>
+  <button class="crash" onclick="refund('CRASH_AFTER_COMMIT')">💣 Crash after step 4</button>
+</div>
+<p class="muted">The rows of the article's table. After a timeout or a crash, do what an agent does: call again.</p>
+<div class="actions hybrid-only">
   <span class="label">Fail (exception)</span>
-  <button class="fail" onclick="refund('CRM_REJECTS')">CRM rejects</button>
   <button class="fail" onclick="refund('CRM_FAILS_AFTER_APPLY')">CRM applies, then errors</button>
   <button class="fail" onclick="refund('FAIL_AFTER_DB_UPDATE')">After the DB update</button>
   <button class="fail" onclick="refund('FAIL_BEFORE_COMMIT')">Before the commit</button>
 </div>
-<div class="actions">
+<div class="actions hybrid-only">
   <span class="label">Crash (JVM halt)</span>
   <button class="crash" onclick="refund('CRASH_AFTER_CRM')">💣 After the CRM update</button>
   <button class="crash" onclick="refund('CRASH_BEFORE_COMMIT')">💣 Before the commit</button>
-  <button class="crash" onclick="refund('CRASH_AFTER_COMMIT')">💣 After the commit</button>
+  <button class="crash" onclick="refund('CRASH_AFTER_PREPARE')">💣 In the middle of the commit</button>
 </div>
 <p id="result"></p>
 
-<div id="down">💀 The app is down. Restart it (<code>mvn spring-boot:run</code>).<span id="waiting">⏳ watching for restart…</span></div>
+<div id="down">💀 The app is down. Restart it (<code>./mvnw spring-boot:run</code>).<span id="waiting">⏳ watching for restart…</span></div>
 <div id="status">
   <div class="scroll">
     <table>
@@ -88,7 +101,18 @@
 
 <section id="arch">
   <h2>How it works</h2>
-  <div class="flow">
+  <div class="naive-only">
+    <div class="flow">
+      <div class="node">four calls, as an agent chains four tools - each commits on its own</div>
+      <div class="step">① mark the order refunded <span class="arrow">→</span> <strong>PostgreSQL</strong></div>
+      <div class="step">② publish RefundIssued <span class="arrow">→</span> <strong>Artemis</strong> · queue "refund.events"</div>
+      <div class="step">③ add the refund note <span class="arrow">→</span> <strong>CRM</strong> over HTTP</div>
+      <div class="step">④ send the confirmation email</div>
+    </div>
+    <p class="muted">Don't do this. A failure or a crash leaves the earlier steps in place, and every call is a new refund,
+      so calling again refunds again.</p>
+  </div>
+  <div class="flow hybrid-only">
     <div class="node">refund(refundId, orderId)</div>
     <div class="step">① record the intent <span class="arrow">→</span> <strong>PostgreSQL</strong> · saga row PENDING</div>
     <div class="step">② add the refund note <span class="arrow">→</span> <strong>CRM</strong> over HTTP, idempotency key = refundId</div>
@@ -107,36 +131,78 @@
 
 <script>
   const $ = id => document.getElementById(id);
-  let last = null; // the previous request, for "retry with the same refundId"
+  let last = null; // the previous request, for the retry button
+  let mode = 'hybrid';
+
+  const MODES = {
+    hybrid: {
+      text: 'One tool for the agent: <code>POST /refunds</code>. XA where you can, sagas where you must.',
+      retry: 'Retry with the same refundId',
+      retryTitle: 'Sends the previous request again, with the same refundId and no fault' },
+    naive: {
+      text: "DON'T DO THIS: the refund as four separate calls (<code>POST /naive-refunds</code>), each committing on its own.",
+      retry: 'Call again',
+      retryTitle: 'Refunds the same order again, as an agent does after a timeout or a crash' } };
+
+  function setMode(value) {
+    mode = value;
+    document.body.classList.toggle('naive', mode === 'naive');
+    $('mode').innerHTML = MODES[mode].text;
+    $('retry').textContent = MODES[mode].retry;
+    $('retry').title = MODES[mode].retryTitle;
+    last = null;
+    $('retry').disabled = true;
+  }
 
   async function post(body, crash) {
     try {
-      const response = await fetch('/refunds', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      const answer = await response.json();
-      const icon = { REFUNDED: '✅', FAILED: '↩', IN_PROGRESS: '⏳' }[answer.outcome] ?? '';
-      $('result').textContent = answer.outcome
-          ? `${icon} ${answer.outcome} (HTTP ${response.status}) - ${body.refundId} for ${body.orderId}` + (answer.detail ? ': ' + answer.detail : '')
-          : `error: HTTP ${response.status} ${answer.error ?? ''}`;
+      if (mode === 'naive') {
+        await postNaive(body);
+      } else {
+        await postHybrid(body);
+      }
     } catch (e) {
       $('result').textContent = crash
-          ? `💥 no answer: the app crashed. Restart it, then retry ${body.refundId} or watch the sweep clean up.`
+          ? '💥 no answer: the app crashed. Restart it, then call again or watch what happens.'
           : '💥 no answer - did the app just crash?';
     }
     refresh();
   }
 
+  async function postHybrid(body) {
+    const response = await fetch('/refunds', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const answer = await response.json();
+    const icon = { REFUNDED: '✅', FAILED: '↩', IN_PROGRESS: '⏳' }[answer.outcome] ?? '';
+    $('result').textContent = answer.outcome
+        ? `${icon} ${answer.outcome} (HTTP ${response.status}) - ${body.refundId} for ${body.orderId}` + (answer.detail ? ': ' + answer.detail : '')
+        : `error: HTTP ${response.status} ${answer.error ?? ''}`;
+  }
+
+  // no refundId and no outcome: only the HTTP status of the last step that ran
+  async function postNaive(body) {
+    const response = await fetch('/naive-refunds', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    $('result').textContent = response.ok
+        ? `done (HTTP ${response.status}) - four steps for ${body.orderId}`
+        : `💥 error (HTTP ${response.status}) - a step failed; the steps before it stay committed`;
+  }
+
   function refund(fault) {
     const orderId = $('order').value;
     if (!orderId) { $('result').textContent = 'no order selected'; return; }
-    last = { refundId: 'r-' + Math.random().toString(36).slice(2, 8), orderId };
+    if (mode === 'naive') {
+      last = { orderId };
+    } else {
+      last = { refundId: 'r-' + Math.random().toString(36).slice(2, 8), orderId };
+    }
     $('retry').disabled = false;
     $('result').textContent = fault ? `refunding ${orderId} with fault ${fault}…` : `refunding ${orderId}…`;
     post(fault ? { ...last, fault } : last, fault && fault.startsWith('CRASH_'));
   }
 
   function retry() {
-    $('result').textContent = `retrying ${last.refundId}…`;
+    $('result').textContent = `calling again for ${last.refundId ?? last.orderId}…`;
     post(last, false);
   }
 
@@ -151,8 +217,10 @@
   // One row per order: what each system knows about it, and whether they agree.
   function view(order, state) {
     const sagas = state.sagas.filter(s => s.order_id === order.id);
-    const keys = new Set(sagas.map(s => s.refund_id));
-    const billing = state.billingLedger.filter(b => b.order_id === order.id).length;
+    const billed = state.billingLedger.filter(b => b.order_id === order.id);
+    // a refund without coordination has no saga row: its id is only known from the billing event
+    const keys = new Set([...sagas, ...billed].map(r => r.refund_id));
+    const billing = billed.length;
     const emails = state.sentEmails.filter(e => keys.has(e.refund_id)).length;
     const notes = state.crmNotes.filter(n => keys.has(n.idempotency_key));
     const active = notes.filter(n => n.status === 'ACTIVE').length;
@@ -224,6 +292,8 @@
     }
   }
 
+  // the browser may restore the previous choice on a reload
+  setMode(document.querySelector('input[name="mode"]:checked').value);
   (function poll() { refresh().finally(() => setTimeout(poll, 500)); })();
 </script>
 </body>
