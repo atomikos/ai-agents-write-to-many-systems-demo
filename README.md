@@ -6,10 +6,14 @@ A Spring Boot 4 application that implements the hybrid pattern from the article
 
 | Step | System | How it is made consistent |
 |---|---|---|
-| Mark the order refunded | PostgreSQL | XA transaction |
-| Publish `RefundIssued` | Artemis queue `refund.events` | same XA transaction |
-| Send the confirmation email | Artemis queue `email.requests` | request written in the same XA transaction, sent after commit |
-| Update the CRM | HTTP API (fake, in this app) | idempotency key + compensation, driven by a durable saga row |
+| 1. Mark the order refunded | PostgreSQL | XA transaction |
+| 2. Publish `RefundIssued` | Artemis queue `refund.events` | same XA transaction |
+| 3. Update the CRM | HTTP API (fake, in this app) | idempotency key + compensation, driven by a durable saga row |
+| 4. Send the confirmation email | Artemis queue `email.requests` | request written in the same XA transaction, sent after commit |
+
+The step numbers are the article's: the order in which an agent would call four
+tools. The hybrid pattern runs step 3 first, before the XA transaction, so that a
+CRM that refuses leaves nothing to undo.
 
 The transaction manager is Atomikos (`transactions-spring-boot4-starter` 6.0.1).
 
@@ -86,6 +90,13 @@ Click the fault's button on the page, or add `"fault"` to the request and look a
 
 After a `CRASH_*` fault, start the application again. A refund left `PENDING` by a crash
 is compensated once it is older than `refund.saga.stale-after` (30 seconds).
+
+A crash can also catch billing or the email sender in the middle of its own
+commit. If no commit decision was logged yet, recovery waits for
+`atomikos.properties.max-timeout` (5 minutes by default) before it rolls that
+transaction back - a live but slow transaction must not be rolled back by mistake.
+The message is then delivered again, and the booking or email still happens
+exactly once, only later. The tests shorten this to seconds.
 
 ```bash
 curl -s -H 'Content-Type: application/json' \

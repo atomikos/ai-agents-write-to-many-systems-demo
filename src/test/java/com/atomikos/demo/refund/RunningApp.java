@@ -76,6 +76,10 @@ final class RunningApp implements AutoCloseable {
                 "--spring.artemis.user=" + artemis.getUser(),
                 "--spring.artemis.password=" + artemis.getPassword(),
                 "--atomikos.properties.log-base-dir=" + workDir.resolve("transaction-logs"),
+                // a crash can catch a listener in the middle of its own commit; recovery rolls that
+                // branch back only after max-timeout (5 minutes by default), so shorten it to seconds
+                "--atomikos.properties.max-timeout=12s",
+                "--atomikos.properties.recovery.delay=3s",
                 // abandoned refunds are compensated after seconds instead of half a minute
                 "--refund.saga.stale-after=2s",
                 "--refund.saga.sweep-interval=500ms"));
