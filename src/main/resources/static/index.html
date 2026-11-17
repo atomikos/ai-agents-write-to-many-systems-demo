@@ -114,18 +114,18 @@
   </div>
   <div class="flow hybrid-only">
     <div class="node">refund(refundId, orderId)</div>
-    <div class="step">① record the intent <span class="arrow">→</span> <strong>PostgreSQL</strong> · saga row PENDING</div>
-    <div class="step">② add the refund note <span class="arrow">→</span> <strong>CRM</strong> over HTTP, idempotency key = refundId</div>
+    <div class="step">first, record the intent <span class="arrow">→</span> <strong>PostgreSQL</strong> · saga row PENDING</div>
+    <div class="step">③ add the refund note <span class="arrow">→</span> <strong>CRM</strong> over HTTP, idempotency key = refundId · before the others, so a refusal leaves nothing to undo</div>
     <div class="boxed">
-      <div class="step">③ mark the order refunded, saga row COMPLETED <span class="arrow">→</span> <strong>PostgreSQL</strong></div>
-      <div class="step">④ publish RefundIssued <span class="arrow">→</span> <strong>Artemis</strong> · queue "refund.events"</div>
-      <div class="step">⑤ request the confirmation email <span class="arrow">→</span> <strong>Artemis</strong> · queue "email.requests"</div>
+      <div class="step">① mark the order refunded, saga row COMPLETED <span class="arrow">→</span> <strong>PostgreSQL</strong></div>
+      <div class="step">② publish RefundIssued <span class="arrow">→</span> <strong>Artemis</strong> · queue "refund.events"</div>
+      <div class="step">④ request the confirmation email <span class="arrow">→</span> <strong>Artemis</strong> · queue "email.requests"</div>
     </div>
     <div class="tx-label">Dashed box = one XA transaction: all three commit together, or none does.</div>
     <div class="arrow">↓&nbsp; only after commit</div>
     <div class="node">BillingListener books the refund · EmailSender sends the email</div>
   </div>
-  <p class="muted">The CRM cannot join the transaction. If anything fails after step ②, the compensator reverts the note by its key;
+  <p class="muted hybrid-only">Step numbers as in the article. The CRM cannot join the transaction. If anything fails after step ③, the compensator reverts the note by its key;
     after a crash, a sweep does the same once the refund has been PENDING for 30 seconds.</p>
 </section>
 
